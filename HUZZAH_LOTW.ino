@@ -21,7 +21,7 @@ char pass[] = "PASSWORD";
 char lotw_user[] = "USER";
 char lotw_pass[] = "PASSWORD";
 
-// Fingerprint for LOTW
+// Fingerprint for LOTW this will expire eventually
 const uint8_t fingerprint[20] = {0x8C, 0xA1, 0xC9, 0x5C, 0x09, 0x75, 0x13, 0x2C, 0x6E, 0x98, 0x93, 0xE2, 0x2A, 0x9E, 0xC9, 0x6D, 0xFC, 0xD6, 0xEE, 0x58};
 
 ESP8266WiFiMulti WiFiMulti;
@@ -30,7 +30,7 @@ Adafruit_SSD1306 display = Adafruit_SSD1306();
 
 // Updates
 unsigned long previousMillis = 0;
-const int updateIntervalMinutes = 1;
+const int updateIntervalMinutes = 15;
 
 void setup()
 {
@@ -49,7 +49,7 @@ void setup()
     display.setTextColor(WHITE);
     display.display();
     
-    // Initialize SPIFFS, need a displayed error here
+    // Initialize SPIFFS, need a displayed error here if not available
     bool spiffsEnabled = SPIFFS.begin();
 }
 
@@ -57,7 +57,7 @@ void loop() {
     // wait for WiFi connection
     if ((WiFiMulti.run() == WL_CONNECTED))
     {
-        
+        // Non blocking updates
         unsigned long currentMillis = millis();
         
         if (currentMillis - previousMillis >= (updateIntervalMinutes * (60 *1000)) || !hadFirstUpdate)
@@ -69,6 +69,7 @@ void loop() {
     }
     else
     {
+        // Waiting on WiFi
         display.clearDisplay();
         display.setTextSize(1);
         display.setCursor(0,0);
@@ -88,20 +89,22 @@ void updateQSLCount()
     client->setFingerprint(fingerprint);
     
     HTTPClient https;
-    
+
+    // URL building
     String URL = "https://lotw.arrl.org/lotwuser/lotwreport.adi?login=";
     URL += String(lotw_user);
     URL += "&password=";
     URL += String(lotw_pass);
     URL += "&qso_query=1&qso_qsl=yes";
-    
+
+    // If we have a previous update saved then use it
     String last = lastQSL();
-    if(last.length() > 6)
+    if(last.length() > 16) // Date time is longer than this but seems a sufficient check
     {
         URL += "&qso_qslsince=";
-        URL += getSubstring(last, ' ', 0);
+        URL += getDelimitedSubstring(last, ' ', 0);
         URL += "+";
-        String timeString = getSubstring(last, ' ', 1);
+        String timeString = getDelimitedSubstring(last, ' ', 1);
         timeString = timeString.substring(0, 8);
         timeString.replace(":", "%3A");
         URL += timeString;
@@ -135,22 +138,20 @@ void updateQSLCount()
                 
                 for(int i = 0; i < 20; i++)
                 {
-                    String line = getSubstring(payload, '\n', i);
+                    String line = getDelimitedSubstring(payload, '\n', i);
                     
                     if( line.startsWith("<APP_LoTW_LASTQSL"))
                     {
-                        lastQSLDate = getSubstring(line, '>', 1);
+                        lastQSLDate = getDelimitedSubstring(line, '>', 1);
                         setLastQSL(lastQSLDate);
                     }
                     
                     if( line.startsWith("<APP_LoTW_NUMREC"))
                     {
-                        qslCount = getSubstring(line, '>', 1);
+                        qslCount = getDelimitedSubstring(line, '>', 1);
                     }
                 }
-                
-                Serial.println(payload);
-                
+                // Display details
                 display.clearDisplay();
                 display.setTextSize(1);
                 display.setCursor(0,0);
@@ -161,11 +162,17 @@ void updateQSLCount()
                 display.print(qslCount);
                 display.println(" New QSLs");
                 display.display();
-                
+
+                int newQSLs = qslCount.toInt();
+                if(newQSLs > 0)
+                {
+                    sendNotification(newQSLs);
+                }
             }
         }
         else
         {
+            // Errored out, this should go o the display instead
             Serial.printf("[HTTPS] GET... failed, error: %s\n", https.errorToString(httpCode).c_str());
         }
         
@@ -177,7 +184,7 @@ void updateQSLCount()
     }
 }
 
-String getSubstring(String data, char separator, int index)
+String getDelimitedSubstring(String data, char separator, int index)
 {
     int found = 0;
     int strIndex[] = { 0, -1 };
@@ -214,7 +221,6 @@ String lastQSL()
         {
             Serial.println("file creation failed");
         }
-        // now write two lines in key/value style with  end-of-line characters
     } 
     else 
     {
@@ -245,4 +251,10 @@ void setLastQSL(String dateTime)
     }
     
     f.close();
+}
+
+// Send notification on new QSLs
+void sendNotification(int numNewQSL)
+{
+  //Send an email/SMS when we have something new
 }
