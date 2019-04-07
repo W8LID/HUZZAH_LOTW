@@ -87,7 +87,7 @@ void loop() {
               screenIndex++;
             }
             showScreen(screenIndex);
-            //
+            // we reset the timer in showScreen() so caller gets their full time
             //previousMillisScreen = millis();
         }
     }
@@ -159,7 +159,7 @@ void updateQSLCount()
                     newQSLSinceReset += newQSLCount;
                     sendNotification(newQSLCount);
                 }
-                screenIndex = 0;
+                screenIndex = 2;
                 showScreen(screenIndex);
             }
             else
