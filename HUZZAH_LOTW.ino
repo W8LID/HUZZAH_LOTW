@@ -17,9 +17,9 @@ bool hadFirstUpdate = false;
 
 // Credentials
 char ssid[] = "SSID";
-char pass[] = "PASSWORD";
+char pass[] = "PASS";
 char lotw_user[] = "USER";
-char lotw_pass[] = "PASSWORD";
+char lotw_pass[] = "PASS";
 
 // Fingerprint for LOTW this will expire eventually
 const uint8_t fingerprint[20] = {0x8C, 0xA1, 0xC9, 0x5C, 0x09, 0x75, 0x13, 0x2C, 0x6E, 0x98, 0x93, 0xE2, 0x2A, 0x9E, 0xC9, 0x6D, 0xFC, 0xD6, 0xEE, 0x58};
@@ -30,7 +30,16 @@ Adafruit_SSD1306 display = Adafruit_SSD1306();
 
 // Updates
 unsigned long previousMillis = 0;
+unsigned long previousMillisScreen = 0;
+
+const int updateIntervalSecScreen = 5;
 const int updateIntervalMinutes = 15;
+
+int newQSLCount = 0;
+int newQSLSinceReset = 0;
+int screenIndex = 0;
+String lastQSLDate = "";
+String lastQSLTime = "";
 
 void setup()
 {
@@ -57,25 +66,35 @@ void loop() {
     // wait for WiFi connection
     if ((WiFiMulti.run() == WL_CONNECTED))
     {
-        // Non blocking updates
-        unsigned long currentMillis = millis();
         
-        if (currentMillis - previousMillis >= (updateIntervalMinutes * (60 *1000)) || !hadFirstUpdate)
+        // Non blocking updates        
+        if (millis() - previousMillis >= (updateIntervalMinutes * (60 *1000)) || !hadFirstUpdate)
         {
             // save the last time we updated
-            previousMillis = currentMillis;
+            previousMillis = millis();
             updateQSLCount();
+        }
+                // Non blocking updates        
+        if (millis() - previousMillisScreen >= (updateIntervalSecScreen * 1000))
+        {
+            // save the last time we updated
+            if(screenIndex >= 3)
+            {
+              screenIndex = 0;
+            }
+            else
+            {
+              screenIndex++;
+            }
+            showScreen(screenIndex);
+            //
+            //previousMillisScreen = millis();
         }
     }
     else
     {
         // Waiting on WiFi
-        display.clearDisplay();
-        display.setTextSize(1);
-        display.setCursor(0,0);
-        display.print("Connecting to WiFi");
-        display.display();
-        delay(500);
+        pauseForWiFi();
     }
 }
 
@@ -89,36 +108,13 @@ void updateQSLCount()
     client->setFingerprint(fingerprint);
     
     HTTPClient https;
-
-    // URL building
-    String URL = "https://lotw.arrl.org/lotwuser/lotwreport.adi?login=";
-    URL += String(lotw_user);
-    URL += "&password=";
-    URL += String(lotw_pass);
-    URL += "&qso_query=1&qso_qsl=yes";
-
-    // If we have a previous update saved then use it
-    String last = lastQSL();
-    if(last.length() > 16) // Date time is longer than this but seems a sufficient check
-    {
-        URL += "&qso_qslsince=";
-        URL += getDelimitedSubstring(last, ' ', 0);
-        URL += "+";
-        String timeString = getDelimitedSubstring(last, ' ', 1);
-        timeString = timeString.substring(0, 8);
-        timeString.replace(":", "%3A");
-        URL += timeString;
-    }
     
-    if (https.begin(*client, URL))
+    if (https.begin(*client, urlForQuery()))
     {  // HTTPS
-        
-        display.clearDisplay();
-        display.setTextSize(1);
-        display.setCursor(0,0);
-        display.print("Connecting to LOTW");
-        display.display();
-        
+        // Show whats happening
+        displayLotwConnection();
+        Serial.println("Fetching update...");
+
         // start connection and send HTTP header
         int httpCode = https.GET();
         
@@ -126,15 +122,17 @@ void updateQSLCount()
         if (httpCode > 0)
         {
             // HTTP header has been send and Server response header has been handled
-            Serial.printf("[HTTPS] GET... code: %d\n", httpCode);
+            //Serial.printf("[HTTPS] GET... code: %d\n", httpCode);
             
             // file found at server
-            if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_MOVED_PERMANENTLY)
+            if (httpCode == HTTP_CODE_OK)
             {
+                Serial.println("Update received.");
+
                 String payload = https.getString();
                 
                 String qslCount = "";
-                String lastQSLDate = "";
+                String lastQSLDateTime = "";
                 
                 for(int i = 0; i < 20; i++)
                 {
@@ -142,8 +140,8 @@ void updateQSLCount()
                     
                     if( line.startsWith("<APP_LoTW_LASTQSL"))
                     {
-                        lastQSLDate = getDelimitedSubstring(line, '>', 1);
-                        setLastQSL(lastQSLDate);
+                        lastQSLDateTime = getDelimitedSubstring(line, '>', 1);
+                        setLastQSL(lastQSLDateTime.substring(0, 19)); //Truncate extra whitespace
                     }
                     
                     if( line.startsWith("<APP_LoTW_NUMREC"))
@@ -151,27 +149,27 @@ void updateQSLCount()
                         qslCount = getDelimitedSubstring(line, '>', 1);
                     }
                 }
-                // Display details
-                display.clearDisplay();
-                display.setTextSize(1);
-                display.setCursor(0,0);
-                display.println("Last QSL date:");
-                display.println(lastQSLDate);
-                display.setTextSize(2);
                 
-                display.print(qslCount);
-                display.println(" New QSLs");
-                display.display();
+                newQSLCount = qslCount.toInt();
+                // Subtract the one QSL we always get for the last date time
+                newQSLCount = newQSLCount - 1;
 
-                int newQSLs = qslCount.toInt();
-                if(newQSLs > 0)
+                if(newQSLCount > 0)
                 {
-                    sendNotification(newQSLs);
+                    newQSLSinceReset += newQSLCount;
+                    sendNotification(newQSLCount);
                 }
+                screenIndex = 0;
+                showScreen(screenIndex);
+            }
+            else
+            {
+                displayHttpError(String(httpCode));
             }
         }
         else
         {
+            displayHttpError(https.errorToString(httpCode));
             // Errored out, this should go o the display instead
             Serial.printf("[HTTPS] GET... failed, error: %s\n", https.errorToString(httpCode).c_str());
         }
@@ -184,6 +182,7 @@ void updateQSLCount()
     }
 }
 
+// 
 String getDelimitedSubstring(String data, char separator, int index)
 {
     int found = 0;
@@ -207,7 +206,7 @@ String lastQSL()
 {
     String dateTime = "";
     
-    File f = SPIFFS.open("/f.txt", "r");
+    File f = SPIFFS.open("/dt.txt", "r");
     
     if (!f)
     {
@@ -216,7 +215,7 @@ String lastQSL()
         Serial.println("Spiffs formatted");
         
         // open the file in write mode
-        File f = SPIFFS.open("/f.txt", "w");
+        File f = SPIFFS.open("/dt.txt", "w");
         if (!f) 
         {
             Serial.println("file creation failed");
@@ -231,15 +230,19 @@ String lastQSL()
             dateTime = f.readStringUntil('\n');
         }
     }
+    // Remove returns
+    dateTime.replace("\r", "");
+
     f.close();
     
     return dateTime;
 }
 
+
 // Write last QSL date time
 void setLastQSL(String dateTime)
 {
-    File f = SPIFFS.open("/f.txt", "w");
+    File f = SPIFFS.open("/dt.txt", "w");
     
     if (!f) 
     {
@@ -257,4 +260,137 @@ void setLastQSL(String dateTime)
 void sendNotification(int numNewQSL)
 {
   //Send an email/SMS when we have something new
+  Serial.println("Sending notification!");
+  Serial.print("Total new since this update: ");
+  Serial.println(numNewQSL);
+  Serial.print("Total new since last reset: ");
+  Serial.println(newQSLSinceReset);
+}
+
+// Diplay errors
+void displayHttpError(String errorCode)
+{
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setCursor(0,0);
+    display.println("[HTTPS] Failed");
+    display.println("Error was:");
+    display.setTextSize(2);
+    display.println(errorCode);
+    display.display();
+}
+
+void displayLotwConnection()
+{
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setCursor(0,0);
+    display.print("Contacting LOTW");
+    display.display();
+}
+
+// Display waiting on WiFi
+void pauseForWiFi()
+{
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setCursor(0,0);
+    display.print("Connecting to WiFi");
+    display.display();
+    delay(500);
+}
+
+// URL Builder
+String urlForQuery()
+{
+    String URL = "https://lotw.arrl.org/lotwuser/lotwreport.adi?login=";
+    URL += String(lotw_user);
+    URL += "&password=";
+    URL += String(lotw_pass);
+    URL += "&qso_query=1&qso_qsl=yes";
+
+    // If we have a previous update saved then use it
+    String last = lastQSL();
+    if(last.length() == 19) // Check for valid DT length
+    {
+        lastQSLDate = getDelimitedSubstring(last, ' ', 0);
+        lastQSLTime = getDelimitedSubstring(last, ' ', 1);
+
+        URL += "&qso_qslsince=";
+        URL += lastQSLDate;
+        URL += "+";
+        String timeStringForURL = lastQSLTime;
+        timeStringForURL.replace(":", "%3A");
+        URL += timeStringForURL;
+    }
+
+    return URL;
+}
+
+void resetNewAccumulator()
+{
+    newQSLSinceReset = 0;
+}
+
+void showScreen(int index)
+{
+    switch(index)
+    {
+      case 0:
+      {
+          // Display details
+          display.clearDisplay();
+          display.setTextSize(1);
+          display.setCursor(0,0);
+          display.println("Latest QSL date:");
+          display.println();
+          display.setTextSize(2);
+          display.println(lastQSLDate);
+          display.display();
+      }
+      break;
+
+      case 1:
+      {
+          // Display details
+          display.clearDisplay();
+          display.setTextSize(1);
+          display.setCursor(0,0);
+          display.println("Latest QSL time:");
+          display.println();
+          display.setTextSize(2);
+          display.println(lastQSLTime + "z");
+          display.display();
+      }
+      break;
+
+      case 2:
+      {
+          // Display details
+          display.clearDisplay();
+          display.setTextSize(1);
+          display.setCursor(0,0);
+          display.println("New QSLs this update:");
+          display.println();
+          display.setTextSize(2);
+          display.println(newQSLCount);
+          display.display();
+      }
+      break;
+
+     case 3:
+      {
+          // Display details
+          display.clearDisplay();
+          display.setTextSize(1);
+          display.setCursor(0,0);
+          display.println("New QSLs since reset:");
+          display.println();
+          display.setTextSize(2);
+          display.println(newQSLSinceReset);
+          display.display();
+      }
+      break;
+    }
+    previousMillisScreen = millis();
 }
